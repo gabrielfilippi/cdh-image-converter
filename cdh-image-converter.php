@@ -2,7 +2,7 @@
 /*
 Plugin Name: CodeHive Image Converter to WebP
 Description: The best image converter plugin on the market, simple, lightweight and optimized. Convert your images to WebP, force them to load and have a much faster website.
-Version: 1.0.0
+Version: 1.0.1
 Author: CodeHive 
 Author URI: https://codehive.com.br
 License: GPL-2.0+
