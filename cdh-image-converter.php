@@ -2,7 +2,7 @@
 /*
 Plugin Name: CodeHive Image Converter to WebP
 Description: The best image converter plugin on the market, simple, lightweight and optimized. Convert your images to WebP, force them to load and have a much faster website.
-Version: 1.0.1
+Version: 1.1.0
 Author: CodeHive 
 Author URI: https://codehive.com.br
 License: GPL-2.0+
@@ -23,6 +23,86 @@ if (!defined('ABSPATH')) {
     exit; // Exit if accessed directly.
 }
 
+global $wpdb;
+define("CDH_TABLE_WEBP_CONVERSION", $wpdb->prefix . 'cdh_webp_conversion');
+
+/**
+ * 
+ * When activate plugin: Create database and add custom schedule
+ * 
+ */
+function cdh_image_converter_activation() {
+    
+    if (check_image_libraries()) {
+        global $wpdb;
+
+        $table_name = CDH_TABLE_WEBP_CONVERSION;
+        $charset_collate = $wpdb->get_charset_collate();
+    
+        $sql = "CREATE TABLE IF NOT EXISTS $table_name (
+            id INT(11) NOT NULL AUTO_INCREMENT,
+            attachment_id INT(11) NOT NULL,
+            image_path VARCHAR(255) NOT NULL,
+            size VARCHAR(50) NULL,
+            PRIMARY KEY (id)
+        ) $charset_collate;";
+    
+        require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
+        dbDelta($sql);
+    
+        if (!wp_next_scheduled('cdh_convert_images_to_webp_cron_event')) {
+            wp_schedule_event(time(), 'cdh_img_converter_daily', 'cdh_convert_images_to_webp_cron_event');
+        }
+
+    }
+
+}
+register_activation_hook(__FILE__, 'cdh_image_converter_activation');
+
+
+/**
+ * We clear crons on disabled plugin
+ */
+register_deactivation_hook( __FILE__, 'cdh_image_converter_deactivation' );
+function cdh_image_converter_deactivation() { // runs on plugin is disabled;
+    wp_clear_scheduled_hook( 'cdh_convert_images_to_webp_cron_event' );
+}
+
+/**
+ * 
+ * When plugin is loaded, verify if plugin can be work
+ * 
+ */
+add_action('plugins_loaded', function() {
+    if (check_image_libraries()) {
+        // Verifica se pode usar GD ou imagick
+        add_action('admin_notices', function() {
+            if (!extension_loaded('gd') && !class_exists('Imagick')) {
+                echo '<div class="error"><p>';
+                echo 'As bibliotecas GD ou imagick não estão disponíveis. O plugin não pode ser executado.';
+                echo '</p></div>';
+            }
+        });
+
+        // Converte imagens para WebP em segundo plano no upload
+        add_filter('wp_generate_attachment_metadata', 'convert_images_to_webp_on_upload', 10, 2);
+
+        // Remove os arquivos WebP ao excluir uma imagem
+        add_action('delete_attachment', 'delete_webp_images');
+
+        // Força o carregamento das imagens no formato WebP, caso possível
+        add_filter('wp_get_attachment_image_src', 'force_webp_image', 10, 4);
+
+        add_filter( 'wp_get_attachment_image', 'force_webp_implements_in_html', 10, 5 );
+    } else {
+        // Exibe um aviso caso GD ou imagick não estejam disponíveis
+        add_action('admin_notices', function() {
+            echo '<div class="error"><p>';
+            echo 'As bibliotecas GD ou imagick não estão disponíveis. O plugin não pode ser executado.';
+            echo '</p></div>';
+        });
+    }
+});
 
 // Verifica se GD ou imagick estão disponíveis
 function check_image_libraries() {
@@ -92,7 +172,9 @@ function convert_to_webp($image_path) {
     return false;
 }
 
-// Converte todas as thumbnails para WebP
+/**
+ * Convert all thumbnails to webp
+ */
 function convert_thumbnails_to_webp($post_id) {
     $thumbnail_sizes = get_intermediate_image_sizes();
 
@@ -108,7 +190,11 @@ function convert_thumbnails_to_webp($post_id) {
     }
 }
 
-// Remove as imagens WebP ao excluir uma imagem
+/**
+ * 
+ * Remove all Webp Imagens when exclude Originals images
+ * 
+ */
 function delete_webp_images($post_id) {
     $thumbnail_sizes = get_intermediate_image_sizes();
     $upload_dir = wp_upload_dir();
@@ -134,6 +220,28 @@ function delete_webp_images($post_id) {
 
 }
 
+/**
+ * Convert Imagens on upload images
+ */
+function convert_images_to_webp_on_upload($metadata, $attachment_id) {
+    $file = get_attached_file($attachment_id);
+
+    if (is_supported_image($file)) {
+        $webp_image = convert_to_webp($file);
+
+        if ($webp_image) {
+            update_post_meta($attachment_id, '_wp_attachment_webp', $webp_image);
+        }
+
+        convert_thumbnails_to_webp($attachment_id);
+    }
+
+    return $metadata;
+}
+
+/**
+ * Force Webp images when html is loaded
+ */
 function force_webp_image($image, $attachment_id, $size) {
     if (!empty($image[0])) {
         // Obtém o caminho completo do diretório de upload
@@ -149,6 +257,7 @@ function force_webp_image($image, $attachment_id, $size) {
             // Concatena o caminho absoluto do diretório base com o caminho relativo do arquivo
             $image_path = $upload_dir['basedir'] . $relative_path;
 
+            $file_extension = pathinfo($image_path, PATHINFO_EXTENSION);
             $file_dirname = pathinfo( $image_path, PATHINFO_DIRNAME );
             $file_name_no_ext = pathinfo( $image_path, PATHINFO_FILENAME );
 
@@ -169,6 +278,18 @@ function force_webp_image($image, $attachment_id, $size) {
 
                 // Força o carregamento em WebP
                 $image[0] = $new_image_url;
+            }else{
+                $image_path = $file_dirname . '/' . $file_name_no_ext . '.' . $file_extension;
+                if(is_file($image_path)){
+                    $data = array(
+                        'attachment_id' => $attachment_id,
+                        'image_path' => $image_path,
+                        'size' => $size
+                    );
+        
+                    add_attachament_to_database($data);
+                }
+                
             }
         }
     }
@@ -176,9 +297,12 @@ function force_webp_image($image, $attachment_id, $size) {
     return $image;
 }
 
+
+/**
+ * Force Webp images when html is loaded
+ */
 function force_webp_implements_in_html( $html, $attachment_id, $size, $icon, $attr ){
     if(isset( $attr['src'])){
-
         $originalSource = $attr['src'];
         $srcset = $originalSource;
         if(isset($attr['srcset'])){
@@ -212,70 +336,158 @@ function force_webp_implements_in_html( $html, $attachment_id, $size, $icon, $at
     
         if($hasPicture){
             $html = '<picture><source type="image/webp" srcset="'.$srcset.'" sizes="'.$sizes.'">'.$html.'</picture>';
+        }else{
+            // Obtém o caminho completo do diretório de upload
+            $upload_dir = wp_upload_dir();
+
+            // Remove tudo o que vem após "uploads" na URL
+            $relative_path = strstr($originalSource, '/uploads');
+            // Remove "uploads" do caminho relativo
+            $relative_path = substr($relative_path, strlen('/uploads'));
+
+            // Concatena o caminho absoluto do diretório base com o caminho relativo do arquivo
+            $image_path = $upload_dir['basedir'] . $relative_path;
+
+            $file_dirname = pathinfo( $image_path, PATHINFO_DIRNAME );
+            $file_name_no_ext = pathinfo( $image_path, PATHINFO_FILENAME );
+            $file_extension = pathinfo($image_path, PATHINFO_EXTENSION);
+
+            $image_path = $file_dirname . '/' . $file_name_no_ext . '.' . $file_extension;
+            
+            if(is_file($image_path)){
+                $data = array(
+                    'attachment_id' => $attachment_id,
+                    'image_path' => $image_path,
+                    'size' => $size
+                );
+    
+                add_attachament_to_database($data);
+            }
+            
         }
     }
     
     return $html;
 }
 
-// Aciona o plugin no upload de imagens
-function convert_images_to_webp_on_upload($metadata, $attachment_id) {
-    $file = get_attached_file($attachment_id);
 
-    if (is_supported_image($file)) {
-        $webp_image = convert_to_webp($file);
-
-        if ($webp_image) {
-            update_post_meta($attachment_id, '_wp_attachment_webp', $webp_image);
-        }
-
-        convert_thumbnails_to_webp($attachment_id);
-    }
-
-    return $metadata;
-}
-
-// Adiciona os hooks do plugin
-add_action('plugins_loaded', function() {
-    if (check_image_libraries()) {
-        // Verifica se pode usar GD ou imagick
-        add_action('admin_notices', function() {
-            if (!extension_loaded('gd') && !class_exists('Imagick')) {
-                echo '<div class="error"><p>';
-                echo 'As bibliotecas GD ou imagick não estão disponíveis. O plugin não pode ser executado.';
-                echo '</p></div>';
-            }
-        });
-
-        // Converte imagens para WebP em segundo plano no upload
-        add_filter('wp_generate_attachment_metadata', 'convert_images_to_webp_on_upload', 10, 2);
-
-        // Remove os arquivos WebP ao excluir uma imagem
-        add_action('delete_attachment', 'delete_webp_images');
-
-        // Força o carregamento das imagens no formato WebP, caso possível
-        add_filter('wp_get_attachment_image_src', 'force_webp_image', 10, 4);
-
-        add_filter( 'wp_get_attachment_image', 'force_webp_implements_in_html', 10, 5 );
-    } else {
-        // Exibe um aviso caso GD ou imagick não estejam disponíveis
-        add_action('admin_notices', function() {
-            echo '<div class="error"><p>';
-            echo 'As bibliotecas GD ou imagick não estão disponíveis. O plugin não pode ser executado.';
-            echo '</p></div>';
-        });
-    }
-});
-
-
-// Define um valor padrão de qualidade para imagens JPEG
+/**
+ * Define default Jpeg Quality
+ */
 function set_jpeg_quality($quality) {
     return 85; // Defina o valor desejado de qualidade (0-100)
 }
 add_filter('jpeg_quality', 'set_jpeg_quality', 99999);
 
-// Define um valor padrão de qualidade para imagens WebP
+/**
+ * Define default Webp Quality
+ */
 function set_webp_quality($quality) {
     return 85; // Defina o valor desejado de qualidade (0-100)
 }
 add_filter('wp_editor_set_quality', 'set_webp_quality', 99999);
+
+/**
+ * 
+ * Save attachament in database to convert in webp images
+ * 
+ */
+function add_attachament_to_database($data){
+    global $wpdb;
+    $table_name = CDH_TABLE_WEBP_CONVERSION;
+    // Verifica se já existe um registro com o mesmo attachment_id e tamanho na tabela
+    $existing_conversion = $wpdb->get_row(
+        $wpdb->prepare(
+            "SELECT * FROM $table_name WHERE attachment_id = %d AND size = %s",
+            $data['attachment_id'],
+            $data['size']
+        )
+    );
+
+    if (!$existing_conversion) {
+        $wpdb->insert(
+            $table_name,
+            array(
+                'attachment_id' => $data['attachment_id'],
+                'image_path' => $data['image_path'],
+                'size' => $data['size']
+            ),
+            array(
+                '%d',
+                '%s',
+                '%s'
+            )
+        );
+    }
+}
+
+/**
+ * 
+ * Convert images in background
+ * 
+ */
+add_action( 'cdh_convert_images_to_webp_cron_event', 'cdh_convert_images_to_webp_in_background');
+function cdh_convert_images_to_webp_in_background() {
+    global $wpdb;
+    $table_name = CDH_TABLE_WEBP_CONVERSION;
+
+    // Obtém os dados de conversão pendentes da tabela
+    $conversion_data = $wpdb->get_results("SELECT * FROM $table_name LIMIT 30");
+
+    if ($conversion_data) {
+        foreach ($conversion_data as $data) {
+            $image_path = $data->image_path;
+
+            $file_dirname = pathinfo( $image_path, PATHINFO_DIRNAME );
+            $file_name_no_ext = pathinfo( $image_path, PATHINFO_FILENAME );
+
+            $webp_image = $file_dirname . '/' . $file_name_no_ext . '.webp';
+            // Verifica novamente se o arquivo em formato WebP ainda não existe
+            if (!file_exists($webp_image)) {
+                $webp_return = convert_to_webp($image_path);
+
+                if ($webp_return) {
+                    if($data->size){
+                        update_post_meta($data->attachment_id, '_wp_attachment_' . $data->size . '_webp', $webp_return);
+                    }else{
+                        update_post_meta($data->attachment_id, '_wp_attachment_webp', $webp_return);
+                    }
+                    // Remove a entrada da tabela após a conversão bem-sucedida
+                    $wpdb->delete(
+                        $table_name,
+                        array(
+                            'id' => $data->id
+                        ),
+                        array(
+                            '%d'
+                        )
+                    );
+                }
+            } else {
+                // Remove a entrada da tabela se o arquivo em formato WebP já existir
+                $wpdb->delete(
+                    $table_name,
+                    array(
+                        'id' => $data->id
+                    ),
+                    array(
+                        '%d'
+                    )
+                );
+            }
+        }
+    }
+}
+
+/**
+ * We configure custom runtimes for the crons we create
+ */
+add_filter( 'cron_schedules',  'cdh_img_converter_custom_cron_schedule' );
+function cdh_img_converter_custom_cron_schedule( $schedules ) {
+    $schedules['cdh_img_converter_daily'] = array(
+        'interval' => 14400, // Every 14400 seconds = 4 hours
+        'display'  => __( 'Every 4 hours' ),
+    );
+
+    return $schedules;
+}
