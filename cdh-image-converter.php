@@ -2,7 +2,7 @@
 /*
 Plugin Name: CodeHive Image Converter to WebP
 Description: The best image converter plugin on the market, simple, lightweight and optimized. Convert your images to WebP, force them to load and have a much faster website.
-Version: 1.1.0
+Version: 1.2.0
 Author: CodeHive 
 Author URI: https://codehive.com.br
 License: GPL-2.0+
@@ -25,6 +25,17 @@ if (!defined('ABSPATH')) {
 
 global $wpdb;
 define("CDH_TABLE_WEBP_CONVERSION", $wpdb->prefix . 'cdh_webp_conversion');
+
+/**
+ * Add support to Woocommerce HPOS
+ * 
+ * @since 19/08/2024
+ */
+add_action( 'before_woocommerce_init', function() {
+	if ( class_exists( \Automattic\WooCommerce\Utilities\FeaturesUtil::class ) ) {
+		\Automattic\WooCommerce\Utilities\FeaturesUtil::declare_compatibility( 'custom_order_tables', __FILE__, true );
+	}
+} );
 
 /**
  * 
